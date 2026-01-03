@@ -1,0 +1,23 @@
+{
+  "name": "google-app-scripts",
+  "version": "1.0.0",
+  "description": "Google Apps Scripts for DeFi and Crypto data",
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "roots": ["<rootDir>/tests"],
+    "testMatch": ["**/*.test.js"],
+    "collectCoverageFrom": [
+      "GoogleScript/**/*.{js,gs}"
+    ],
+    "moduleFileExtensions": ["js", "gs"],
+    "verbose": true
+  }
+}

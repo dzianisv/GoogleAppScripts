@@ -237,17 +237,19 @@ function MAPLE_DETAILS() {
 // ============= MORPHO =============
 
 /**
- * Fetches the current APY from Morpho Steakhouse USDC vault
- * @param {string} vaultAddress - Optional vault address (defaults to Steakhouse USDC)
+ * Fetches the current APY from Morpho vault
+ * @param {string} vaultAddress - Optional vault address (defaults to Steakhouse USDC on mainnet)
+ * @param {number} chainId - Optional chain ID (1=Ethereum, 8453=Base, 42161=Arbitrum, 10=Optimism)
  * @returns {number} The APY as a percentage (e.g., 5.13 for 5.13%)
  * @customfunction
  */
-function MORPHO_APY(vaultAddress) {
+function MORPHO_APY(vaultAddress, chainId) {
   vaultAddress = vaultAddress || '0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB';
+  chainId = chainId || 1;
   
   const url = 'https://blue-api.morpho.org/graphql';
   
-  const query = '{ vaultByAddress(address: "' + vaultAddress + '", chainId: 1) { state { netApy } } }';
+  const query = '{ vaultByAddress(address: "' + vaultAddress + '", chainId: ' + chainId + ') { state { netApy } } }';
   
   const options = {
     method: 'post',
@@ -259,6 +261,10 @@ function MORPHO_APY(vaultAddress) {
   try {
     const response = UrlFetchApp.fetch(url, options);
     const data = JSON.parse(response.getContentText());
+    
+    if (!data.data || !data.data.vaultByAddress || !data.data.vaultByAddress.state) {
+      return 'Error: Could not retrieve vault data. Check vault address and chain ID.';
+    }
     
     const netApy = data.data.vaultByAddress.state.netApy;
     
@@ -270,16 +276,18 @@ function MORPHO_APY(vaultAddress) {
 
 /**
  * Fetches detailed Morpho vault data
- * @param {string} vaultAddress - Optional vault address (defaults to Steakhouse USDC)
+ * @param {string} vaultAddress - Optional vault address (defaults to Steakhouse USDC on mainnet)
+ * @param {number} chainId - Optional chain ID (1=Ethereum, 8453=Base, 42161=Arbitrum, 10=Optimism)
  * @returns {Array} 2D array with vault data
  * @customfunction
  */
-function MORPHO_DETAILS(vaultAddress) {
+function MORPHO_DETAILS(vaultAddress, chainId) {
   vaultAddress = vaultAddress || '0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB';
+  chainId = chainId || 1;
   
   const url = 'https://blue-api.morpho.org/graphql';
   
-  const query = '{ vaultByAddress(address: "' + vaultAddress + '", chainId: 1) { name symbol state { apy netApy netApyWithoutRewards totalAssetsUsd fee } } }';
+  const query = '{ vaultByAddress(address: "' + vaultAddress + '", chainId: ' + chainId + ') { name symbol state { apy netApy netApyWithoutRewards totalAssetsUsd fee } } }';
   
   const options = {
     method: 'post',
@@ -291,6 +299,10 @@ function MORPHO_DETAILS(vaultAddress) {
   try {
     const response = UrlFetchApp.fetch(url, options);
     const data = JSON.parse(response.getContentText());
+    
+    if (!data.data || !data.data.vaultByAddress) {
+      return [['Error', 'Could not retrieve vault data. Check vault address and chain ID.']];
+    }
     
     const vault = data.data.vaultByAddress;
     const state = vault.state;
@@ -504,13 +516,31 @@ function getMapleApyDecimal_() {
  */
 function getMorphoApyDecimal_(url) {
   let vaultAddress = '0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB';
+  let chainId = 1; // Default to Ethereum mainnet
+  
+  // Chain ID mapping for Morpho supported chains
+  const chainIdMap = {
+    'ethereum': 1,
+    'base': 8453,
+    'arbitrum': 42161,
+    'optimism': 10,
+    'polygon': 137
+  };
+  
+  // Extract chain from URL: https://app.morpho.org/base/vault/0x...
+  const chainMatch = url.match(/app\.morpho\.org\/([a-z]+)\/vault/);
+  if (chainMatch && chainIdMap[chainMatch[1]]) {
+    chainId = chainIdMap[chainMatch[1]];
+  }
+  
+  // Extract vault address
   const vaultMatch = url.match(/vault\/([^/?]+)/);
   if (vaultMatch) {
     vaultAddress = vaultMatch[1];
   }
   
   const cache = CacheService.getScriptCache();
-  const cacheKey = "morphoApyDecimal_" + vaultAddress;
+  const cacheKey = "morphoApyDecimal_" + chainId + "_" + vaultAddress;
   const cachedData = cache.get(cacheKey);
 
   if (cachedData) {
@@ -518,7 +548,7 @@ function getMorphoApyDecimal_(url) {
   }
 
   const apiUrl = 'https://blue-api.morpho.org/graphql';
-  const query = '{ vaultByAddress(address: "' + vaultAddress + '", chainId: 1) { state { netApy } } }';
+  const query = '{ vaultByAddress(address: "' + vaultAddress + '", chainId: ' + chainId + ') { state { netApy } } }';
   
   const options = {
     method: 'post',
@@ -530,6 +560,10 @@ function getMorphoApyDecimal_(url) {
   try {
     const response = UrlFetchApp.fetch(apiUrl, options);
     const data = JSON.parse(response.getContentText());
+    
+    if (!data.data || !data.data.vaultByAddress || !data.data.vaultByAddress.state) {
+      return 'Error: Could not retrieve vault data. Check vault address and chain.';
+    }
     
     const netApy = data.data.vaultByAddress.state.netApy;
     
@@ -737,7 +771,8 @@ function insertAllApys() {
  */
 function testGetAverageApy() {
   console.log("Maple:", getAverageApy("https://app.maple.finance/earn"));
-  console.log("Morpho:", getAverageApy("https://app.morpho.org/vault/0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB"));
+  console.log("Morpho (Ethereum):", getAverageApy("https://app.morpho.org/vault/0xBEEF01735c132Ada46AA9aA4c54623cAA92A64CB"));
+  console.log("Morpho (Base):", getAverageApy("https://app.morpho.org/base/vault/0xB7890CEE6CF4792cdCC13489D36D9d42726ab863/universal-usdc"));
   console.log("Beefy:", getAverageApy("https://app.beefy.com/vault/compound-base-usdc"));
   console.log("DeFiLlama:", getAverageApy("https://defillama.com/yields/pool/e2f0e83e-e07b-44bd-9718-e25b96295468"));
   console.log("Palette/TON:", getAverageApy("https://yield.palette.finance/pools/EQA-X_yo3fzzbDbJ_0bzFWKqtRuZFIRa1sJsveZJ1YpViO3r"));
