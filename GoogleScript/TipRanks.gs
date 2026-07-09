@@ -11,9 +11,9 @@ function PRICE_TARGET(symbol) {
   symbol = symbol.toString().toUpperCase().trim();
   
   const cache = CacheService.getScriptCache();
-  const cacheKey = "TipRanks_" + symbol;
+  const cacheKey = "PT_" + symbol;
   
-  // Check cache
+  // Check cache first
   const cached = cache.get(cacheKey);
   if (cached) {
     const value = parseFloat(cached);
@@ -22,7 +22,7 @@ function PRICE_TARGET(symbol) {
   
   let result = null;
   
-  // Try Nasdaq API first (most reliable, JSON API)
+  // Try Nasdaq API first (most reliable and fastest)
   result = getNasdaqPriceTarget(symbol);
   
   // Fallback to FinViz
@@ -35,9 +35,14 @@ function PRICE_TARGET(symbol) {
     result = getMarketWatchPriceTarget(symbol);
   }
   
-  // Last resort: Yahoo Finance (main quote page)
+  // Fallback to Yahoo Finance
   if (!result) {
     result = getYahooPriceTarget(symbol);
+  }
+  
+  // Last resort: TipRanks (often blocked, slowest)
+  if (!result) {
+    result = getTipRanksPriceTarget(symbol);
   }
   
   if (result) {
@@ -69,7 +74,7 @@ function PRICE_TARGET_DETAIL(symbol, field) {
   if (cached) {
     data = JSON.parse(cached);
   } else {
-    // Try Nasdaq API first (most reliable, JSON API)
+    // Try Nasdaq API first (most reliable and fastest)
     data = getNasdaqFullData(symbol);
     
     // Fallback to FinViz
@@ -82,9 +87,14 @@ function PRICE_TARGET_DETAIL(symbol, field) {
       data = getMarketWatchFullData(symbol);
     }
     
-    // Last resort: Yahoo Finance
+    // Fallback to Yahoo Finance
     if (!data) {
       data = getYahooFullData(symbol);
+    }
+    
+    // Last resort: TipRanks (often blocked)
+    if (!data) {
+      data = getTipRanksFullData(symbol);
     }
     
     if (data) {
@@ -116,6 +126,244 @@ function PRICE_TARGET_DETAIL(symbol, field) {
  */
 function ANALYST_RATING(symbol) {
   return PRICE_TARGET_DETAIL(symbol, "rating");
+}
+
+// ============= TIPRANKS (USER PREFERRED) =============
+
+/**
+ * Get price target from TipRanks
+ * TipRanks uses JavaScript rendering, so we scrape from their static HTML
+ * URL: https://www.tipranks.com/stocks/{symbol}/forecast
+ */
+function getTipRanksPriceTarget(symbol) {
+  try {
+    const data = getTipRanksFullData(symbol);
+    return data ? data.mean : null;
+  } catch (e) {
+    console.log("TipRanks error for " + symbol + ": " + e.message);
+    return null;
+  }
+}
+
+/**
+ * Get full analyst data from TipRanks
+ * Returns: { mean, high, low, count, buy, hold, sell, rating }
+ */
+function getTipRanksFullData(symbol) {
+  try {
+    const url = `https://www.tipranks.com/stocks/${symbol.toLowerCase()}/forecast`;
+    
+    const response = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      followRedirects: true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0'
+      }
+    });
+    
+    const responseCode = response.getResponseCode();
+    if (responseCode !== 200) {
+      console.log("TipRanks returned status: " + responseCode);
+      return null;
+    }
+    
+    const html = response.getContentText();
+    
+    // TipRanks embeds data in the page - look for various patterns
+    const data = {};
+    
+    // Pattern 1: Look for "average price target is $XXX.XX"
+    const avgMatch = html.match(/average price target is \$([0-9,.]+)/i);
+    if (avgMatch) {
+      data.mean = parseFloat(avgMatch[1].replace(/,/g, ''));
+    }
+    
+    // Pattern 2: Look for "high forecast of $XXX.XX"
+    const highMatch = html.match(/high forecast of \$([0-9,.]+)/i);
+    if (highMatch) {
+      data.high = parseFloat(highMatch[1].replace(/,/g, ''));
+    }
+    
+    // Pattern 3: Look for "low forecast of $XXX.XX"
+    const lowMatch = html.match(/low forecast of \$([0-9,.]+)/i);
+    if (lowMatch) {
+      data.low = parseFloat(lowMatch[1].replace(/,/g, ''));
+    }
+    
+    // Pattern 4: Look for analyst count "Based on XX analysts" or "Based on XX Wall Street analysts"
+    const countMatch = html.match(/Based on (\d+) (?:Wall Street )?analysts/i);
+    if (countMatch) {
+      data.count = parseInt(countMatch[1]);
+    }
+    
+    // Pattern 5: Look for buy/hold/sell counts "X Buy X Hold X Sell"
+    const ratingsMatch = html.match(/(\d+)\s*Buy\s+(\d+)\s*Hold\s+(\d+)\s*Sell/i);
+    if (ratingsMatch) {
+      data.buy = parseInt(ratingsMatch[1]);
+      data.hold = parseInt(ratingsMatch[2]);
+      data.sell = parseInt(ratingsMatch[3]);
+    }
+    
+    // Pattern 6: Look for rating text (Strong Buy, Moderate Buy, Hold, etc.)
+    const ratingMatch = html.match(/(Strong Buy|Moderate Buy|Buy|Hold|Moderate Sell|Sell|Strong Sell)/i);
+    if (ratingMatch) {
+      data.rating = ratingMatch[1];
+    }
+    
+    // Pattern 7: Alternative - look for JSON data in script tags
+    if (!data.mean) {
+      // Try to find price target in Next.js data or other embedded JSON
+      const jsonMatch = html.match(/"priceTarget":\s*([0-9.]+)/i);
+      if (jsonMatch) {
+        data.mean = parseFloat(jsonMatch[1]);
+      }
+    }
+    
+    // Pattern 8: Look for "Average Price Target $XXX.XX"
+    if (!data.mean) {
+      const altAvgMatch = html.match(/Average Price Target[^$]*\$([0-9,.]+)/i);
+      if (altAvgMatch) {
+        data.mean = parseFloat(altAvgMatch[1].replace(/,/g, ''));
+      }
+    }
+    
+    // Pattern 9: Look for "Highest Price Target $XXX.XX"
+    if (!data.high) {
+      const altHighMatch = html.match(/Highest Price Target[^$]*\$([0-9,.]+)/i);
+      if (altHighMatch) {
+        data.high = parseFloat(altHighMatch[1].replace(/,/g, ''));
+      }
+    }
+    
+    // Pattern 10: Look for "Lowest Price Target $XXX.XX"
+    if (!data.low) {
+      const altLowMatch = html.match(/Lowest Price Target[^$]*\$([0-9,.]+)/i);
+      if (altLowMatch) {
+        data.low = parseFloat(altLowMatch[1].replace(/,/g, ''));
+      }
+    }
+    
+    // Validate we got at least the mean price target
+    if (data.mean && !isNaN(data.mean)) {
+      return {
+        mean: data.mean,
+        high: data.high || data.mean,
+        low: data.low || data.mean,
+        count: data.count || (data.buy || 0) + (data.hold || 0) + (data.sell || 0) || 1,
+        buy: data.buy || 0,
+        hold: data.hold || 0,
+        sell: data.sell || 0,
+        rating: data.rating || "N/A",
+        source: "TipRanks"
+      };
+    }
+    
+    console.log("TipRanks: Could not parse price target data for " + symbol);
+    return null;
+  } catch (e) {
+    console.log("TipRanks full data error for " + symbol + ": " + e.message);
+    return null;
+  }
+}
+
+/**
+ * Direct TipRanks price target function
+ * @param {string} symbol - Stock ticker symbol
+ * @return {number|string} Price target from TipRanks
+ * @customfunction
+ */
+function TIPRANKS_PRICE_TARGET(symbol) {
+  if (!symbol) return "No symbol";
+  symbol = symbol.toString().toUpperCase().trim();
+  
+  const cache = CacheService.getScriptCache();
+  const cacheKey = "TR_PT_" + symbol;
+  
+  const cached = cache.get(cacheKey);
+  if (cached) {
+    const value = parseFloat(cached);
+    return isNaN(value) ? cached : value;
+  }
+  
+  const result = getTipRanksPriceTarget(symbol);
+  
+  if (result) {
+    cache.put(cacheKey, result.toString(), TIPRANKS_CACHE_DURATION);
+    return result;
+  }
+  
+  return "N/A";
+}
+
+/**
+ * Get detailed TipRanks data
+ * @param {string} symbol - Stock ticker symbol
+ * @param {string} field - "mean", "high", "low", "count", "buy", "hold", "sell", "rating"
+ * @return {number|string}
+ * @customfunction
+ */
+function TIPRANKS_DETAIL(symbol, field) {
+  if (!symbol) return "No symbol";
+  symbol = symbol.toString().toUpperCase().trim();
+  field = (field || "mean").toString().toLowerCase();
+  
+  const cache = CacheService.getScriptCache();
+  const cacheKey = "TR_FULL_" + symbol;
+  
+  let data;
+  const cached = cache.get(cacheKey);
+  
+  if (cached) {
+    data = JSON.parse(cached);
+  } else {
+    data = getTipRanksFullData(symbol);
+    if (data) {
+      cache.put(cacheKey, JSON.stringify(data), TIPRANKS_CACHE_DURATION);
+    }
+  }
+  
+  if (!data) return "N/A";
+  
+  switch(field) {
+    case "mean": return data.mean || "N/A";
+    case "high": return data.high || "N/A";
+    case "low": return data.low || "N/A";
+    case "count": return data.count || "N/A";
+    case "buy": return data.buy || "N/A";
+    case "hold": return data.hold || "N/A";
+    case "sell": return data.sell || "N/A";
+    case "rating": return data.rating || "N/A";
+    default: return data.mean || "N/A";
+  }
+}
+
+function testTipRanks() {
+  console.log("Testing TipRanks directly:");
+  
+  const symbols = ["COIN", "AAPL", "MSFT", "NVDA"];
+  
+  symbols.forEach(symbol => {
+    console.log("\n--- " + symbol + " ---");
+    const data = getTipRanksFullData(symbol);
+    if (data) {
+      console.log("Mean: $" + data.mean);
+      console.log("High: $" + data.high);
+      console.log("Low: $" + data.low);
+      console.log("Analysts: " + data.count + " (Buy: " + data.buy + ", Hold: " + data.hold + ", Sell: " + data.sell + ")");
+      console.log("Rating: " + data.rating);
+    } else {
+      console.log("No data available");
+    }
+  });
 }
 
 // ============= NASDAQ API (PRIMARY SOURCE) =============
@@ -526,3 +774,237 @@ function testPriceTargetDetail() {
   console.log(symbol + " Sell:", PRICE_TARGET_DETAIL(symbol, "sell"));
   console.log(symbol + " Rating:", PRICE_TARGET_DETAIL(symbol, "rating"));
 }
+
+// ============= UNIT TESTS =============
+// Run with: clasp run runAllTests
+// Or run individual test functions from the Apps Script editor
+
+/**
+ * Test runner helper class
+ */
+class TestRunner {
+  constructor(suiteName) {
+    this.suiteName = suiteName;
+    this.passed = 0;
+    this.failed = 0;
+    this.tests = [];
+  }
+  
+  assert(testName, condition, actual, expected) {
+    const result = {
+      name: testName,
+      passed: condition,
+      actual: actual,
+      expected: expected
+    };
+    this.tests.push(result);
+    if (condition) {
+      this.passed++;
+      console.log("✓ PASS: " + testName);
+    } else {
+      this.failed++;
+      console.log("✗ FAIL: " + testName + " - Expected: " + expected + ", Got: " + actual);
+    }
+    return condition;
+  }
+  
+  assertEqual(testName, actual, expected) {
+    return this.assert(testName, actual === expected, actual, expected);
+  }
+  
+  assertNotEqual(testName, actual, notExpected) {
+    return this.assert(testName, actual !== notExpected, actual, "not " + notExpected);
+  }
+  
+  assertType(testName, value, expectedType) {
+    return this.assert(testName, typeof value === expectedType, typeof value, expectedType);
+  }
+  
+  assertInRange(testName, value, min, max) {
+    const inRange = typeof value === "number" && value >= min && value <= max;
+    return this.assert(testName, inRange, value, "between " + min + " and " + max);
+  }
+  
+  getResults() {
+    return {
+      suite: this.suiteName,
+      total: this.tests.length,
+      passed: this.passed,
+      failed: this.failed,
+      tests: this.tests,
+      success: this.failed === 0
+    };
+  }
+  
+  printSummary() {
+    console.log("\n" + "=".repeat(50));
+    console.log("TEST SUMMARY: " + this.suiteName);
+    console.log("=".repeat(50));
+    console.log("Total: " + this.tests.length);
+    console.log("Passed: " + this.passed);
+    console.log("Failed: " + this.failed);
+    console.log("=".repeat(50));
+    
+    if (this.failed > 0) {
+      console.log("\nFAILED TESTS:");
+      this.tests.filter(t => !t.passed).forEach(t => {
+        console.log("  - " + t.name);
+        console.log("    Expected: " + t.expected);
+        console.log("    Actual: " + t.actual);
+      });
+    }
+  }
+}
+
+/**
+ * Run all tests - main entry point for clasp run
+ * @returns {Object} Test results with success status
+ */
+function runAllTests() {
+  console.log("=".repeat(50));
+  console.log("RUNNING ALL TESTS");
+  console.log("=".repeat(50));
+  
+  const allResults = [];
+  
+  // Run quick PRICE_TARGET test (optimized for speed)
+  try {
+    allResults.push(testPriceTargetCOIN());
+  } catch (e) {
+    console.log("Error in testPriceTargetCOIN: " + e.message);
+    allResults.push({ suite: "PRICE_TARGET_COIN", success: false, failed: 1, passed: 0, error: e.message });
+  }
+  
+  // Calculate totals
+  const totalPassed = allResults.reduce((sum, r) => sum + (r.passed || 0), 0);
+  const totalFailed = allResults.reduce((sum, r) => sum + (r.failed || 0), 0);
+  const totalTests = totalPassed + totalFailed;
+  const allPassed = totalFailed === 0 && allResults.every(r => r.success !== false);
+  
+  console.log("\n" + "=".repeat(50));
+  console.log("FINAL RESULTS");
+  console.log("=".repeat(50));
+  console.log("Total Tests: " + totalTests);
+  console.log("Passed: " + totalPassed);
+  console.log("Failed: " + totalFailed);
+  console.log("Status: " + (allPassed ? "✓ ALL TESTS PASSED" : "✗ SOME TESTS FAILED"));
+  console.log("=".repeat(50));
+  
+  // Return results object
+  const finalResults = {
+    success: allPassed,
+    totalTests: totalTests,
+    passed: totalPassed,
+    failed: totalFailed,
+    suites: allResults
+  };
+  
+  if (!allPassed) {
+    throw new Error("TESTS FAILED: " + totalFailed + " of " + totalTests + " tests failed");
+  }
+  
+  return finalResults;
+}
+
+/**
+ * Unit test for PRICE_TARGET("COIN") - OPTIMIZED VERSION
+ * Tests that the function returns a valid numeric price target
+ * Run this function from the Apps Script editor or via clasp run testPriceTargetCOIN
+ */
+function testPriceTargetCOIN() {
+  const runner = new TestRunner("PRICE_TARGET_COIN");
+  
+  console.log("=".repeat(50));
+  console.log("UNIT TEST: PRICE_TARGET('COIN')");
+  console.log("=".repeat(50));
+  
+  // Test 1: Call PRICE_TARGET once and reuse result (uses cache for subsequent calls)
+  const result = PRICE_TARGET("COIN");
+  
+  runner.assert(
+    "PRICE_TARGET returns a value",
+    result !== undefined && result !== null,
+    result,
+    "not undefined/null"
+  );
+  
+  // Test 2: Result is not "N/A"
+  runner.assertNotEqual("Result is not N/A", result, "N/A");
+  
+  // Test 3: Result is a number
+  runner.assertType("Result is a valid number", result, "number");
+  
+  // Test 4: Price target is within reasonable range for COIN (Coinbase)
+  runner.assertInRange("Price target in reasonable range ($50-$1000)", result, 50, 1000);
+  
+  // Test 5 & 6: These use cache so they're fast
+  const resultLower = PRICE_TARGET("coin");
+  runner.assertType("Case insensitive - lowercase works", resultLower, "number");
+  
+  const resultWhitespace = PRICE_TARGET("  COIN  ");
+  runner.assertType("Handles whitespace correctly", resultWhitespace, "number");
+  
+  // Print summary
+  runner.printSummary();
+  
+  const results = runner.getResults();
+  
+  if (!results.success) {
+    throw new Error("TEST FAILED: " + results.failed + " of " + results.total + " tests failed");
+  }
+  
+  console.log("\n✓ ALL TESTS PASSED!");
+  return results;
+}
+
+/**
+ * Quick test - minimal test for CI/CD (fastest)
+ * Only tests that PRICE_TARGET returns a valid number
+ */
+function testPriceTargetQuick() {
+  console.log("Quick test: PRICE_TARGET('COIN')");
+  
+  const result = PRICE_TARGET("COIN");
+  
+  if (result === "N/A" || result === "No symbol") {
+    throw new Error("FAIL: PRICE_TARGET returned: " + result);
+  }
+  
+  if (typeof result !== "number" || isNaN(result)) {
+    throw new Error("FAIL: PRICE_TARGET did not return a number: " + typeof result + " = " + result);
+  }
+  
+  if (result < 50 || result > 1000) {
+    throw new Error("FAIL: Price target out of range: $" + result);
+  }
+  
+  console.log("✓ PASS: PRICE_TARGET('COIN') = $" + result);
+  return { success: true, result: result };
+}
+
+/**
+ * Test Nasdaq API directly (fastest data source)
+ */
+function testNasdaqDirect() {
+  console.log("Testing Nasdaq API directly for COIN...");
+  
+  const data = getNasdaqFullData("COIN");
+  
+  if (!data) {
+    throw new Error("FAIL: Nasdaq API returned no data");
+  }
+  
+  if (typeof data.mean !== "number") {
+    throw new Error("FAIL: Nasdaq mean is not a number: " + data.mean);
+  }
+  
+  console.log("✓ PASS: Nasdaq API");
+  console.log("  Mean: $" + data.mean);
+  console.log("  High: $" + data.high);
+  console.log("  Low: $" + data.low);
+  console.log("  Analysts: " + data.count + " (Buy: " + data.buy + ", Hold: " + data.hold + ", Sell: " + data.sell + ")");
+  
+  return { success: true, data: data };
+}
+
+

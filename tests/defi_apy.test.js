@@ -1,5 +1,6 @@
 /**
- * Unit tests for defi_apy.gs
+ * Unit tests for Crypto.gs (formerly defi_apy.gs, renamed to match the
+ * live Apps Script project's actual file name).
  */
 
 // Load mocks before loading the module
@@ -12,7 +13,7 @@ const vm = require('vm');
 
 // Read and execute the GAS file in a context with our mocks
 const gasCode = fs.readFileSync(
-  path.join(__dirname, '../GoogleScript/defi_apy.gs'),
+  path.join(__dirname, '../GoogleScript/Crypto.gs'),
   'utf8'
 );
 
