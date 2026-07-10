@@ -214,13 +214,13 @@ function extractUrlFromCell_(cell) {
  *  - MATIC's own CMC listing (id 3890) returns no live price post the
  *    Polygon migration, so both "MATIC" and "POL" map to POL's id (28321),
  *    same as the old CoinGecko mapping aliased them to one id.
- *  - TON is deliberately NOT in the map: as of 2026-07-09, CMC's former
- *    Toncoin listing (id 11419) now returns symbol "GRAM" / name
- *    "Gram (prev. Toncoin)" -- confirmed live, not a stale cache. No other
- *    CMC listing currently carries the "TON"/Toncoin identity (checked via
- *    https://s3.coinmarketcap.com/generated/core/crypto/web-search.json and
- *    the quote endpoint). Requesting "TON" falls back to last-known-good/
- *    N/A like any unmapped symbol until CMC's canonical id is confirmed.
+ *  - TON maps to CMC id 11419, CMC's former Toncoin listing. As of
+ *    2026-07-09 CMC relabeled this listing to symbol "GRAM" / name
+ *    "Gram (prev. Toncoin)" -- confirmed live, not a stale cache. The owner
+ *    made an explicit decision (2026-07-09) to treat id 11419 as the same
+ *    asset continued under CMC's new label rather than wait for a new
+ *    canonical TON id to appear on CMC; this is a deliberate choice, not a
+ *    silent assumption.
  *
  * On a cache miss, ALL known ids are fetched in ONE batched request and each
  * symbol's price is cached individually, so other cells recalculating in
@@ -256,7 +256,7 @@ function quoteCoinmarketcap(name) {
     "PAXG": 4705, "pax-gold": 4705,
     "OP": 11840, "optimism-ethereum": 11840,
     "USDC": 3408, "USDT": 825,
-    // TON intentionally omitted -- see docstring above.
+    "TON": 11419, "toncoin": 11419,
   };
 
   function lastGoodOrNA_(lastGoodKey) {
@@ -273,9 +273,9 @@ function quoteCoinmarketcap(name) {
 
   const id = CMC_ID_MAP[name1];
   if (id === undefined) {
-    // Unresolvable/unmapped symbol (e.g. "TON" today) -- degrade straight
-    // to last-known-good, same treatment as an unresolvable symbol always
-    // got.
+    // Unresolvable/unmapped symbol (any name not present in CMC_ID_MAP) --
+    // degrade straight to last-known-good, same treatment as an
+    // unresolvable symbol always got.
     return lastGoodOrNA_("cmc_lastgood_" + name1.toLowerCase());
   }
 
