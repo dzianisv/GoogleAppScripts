@@ -198,32 +198,39 @@ function extractUrlFromCell_(cell) {
 }
 
 /**
- * Function to get the price of a cryptocurrency (via CoinGecko's public API).
+ * Function to get the price of a cryptocurrency via CoinMarketCap's internal
+ * (undocumented, no-API-key) website data endpoint:
+ *   GET https://api.coinmarketcap.com/data-api/v3/cryptocurrency/quote/latest
+ *       ?id=<comma-separated CMC numeric ids>&convertId=2781   (2781 = USD)
+ * Confirmed via curl (2026-07-09): works with a normal User-Agent header, no
+ * cookies/key/CAPTCHA; 8 rapid sequential calls all returned clean 200s.
  *
- * NOTE (2026-07-09): despite the name/original docstring, this has NOT called
- * CoinMarketCap for a while -- it calls CoinGecko's public `simple/price`
- * endpoint (no API key). CoinGecko's anonymous/public tier is rate-limited
- * (undocumented, informally ~5-15 req/min per IP, shared across every Google
- * Apps Script user on Google's IPs) and got stricter in 2025. When throttled
- * it returns HTTP 429 with a *plaintext* body ("Throttled"), not JSON -- the
- * old code fed that straight into JSON.parse() with no status check, which
- * threw `Unexpected token 'T', "Throttled" is not valid JSON` and surfaced
- * as literal error text, cascading into #VALUE!/$0 downstream (Crypto!F89,
- * Totals!C6/C7/C11).
+ * Symbols are resolved through a hardcoded symbol -> CMC numeric id map
+ * (CMC_ID_MAP below), each id verified live against this endpoint so its
+ * returned `symbol`/`name` actually matches the intended token. Notable
+ * corrections made during verification:
+ *  - ASTER previously aliased to CoinGecko's "astar" (Astar, a *different*
+ *    chain) -- fixed to CMC id 36341, the real "Aster" DEX/BSC token.
+ *  - MATIC's own CMC listing (id 3890) returns no live price post the
+ *    Polygon migration, so both "MATIC" and "POL" map to POL's id (28321),
+ *    same as the old CoinGecko mapping aliased them to one id.
+ *  - TON is deliberately NOT in the map: as of 2026-07-09, CMC's former
+ *    Toncoin listing (id 11419) now returns symbol "GRAM" / name
+ *    "Gram (prev. Toncoin)" -- confirmed live, not a stale cache. No other
+ *    CMC listing currently carries the "TON"/Toncoin identity (checked via
+ *    https://s3.coinmarketcap.com/generated/core/crypto/web-search.json and
+ *    the quote endpoint). Requesting "TON" falls back to last-known-good/
+ *    N/A like any unmapped symbol until CMC's canonical id is confirmed.
  *
- * Fix: check the HTTP status before parsing, retry twice with backoff, and
- * on final failure fall back to the last confirmed-good price (persisted,
- * no expiry) instead of ever showing N/A/Error once a symbol has resolved
- * successfully at least once.
+ * On a cache miss, ALL known ids are fetched in ONE batched request and each
+ * symbol's price is cached individually, so other cells recalculating in
+ * the same pass hit cache instead of firing more HTTP requests. Retries
+ * twice with backoff on non-200/unparseable responses, and on final failure
+ * falls back to the last confirmed-good price (persisted, no expiry)
+ * instead of ever showing N/A/Error once a symbol has resolved successfully
+ * at least once.
  *
- * Recommended follow-up (not applied here, opt-in via script property):
- * register a free CoinGecko "Demo" API key (no cost, no card) at
- * https://www.coingecko.com/en/developers/dashboard and set it as a script
- * property named COINGECKO_API_KEY (Project Settings > Script properties).
- * The anonymous tier used today is materially stricter than the free keyed
- * tier, which is the more durable fix for the throttling itself.
- *
- * @param {string} name - The cryptocurrency name or symbol (e.g., "bitcoin", "ETH", "SOL").
+ * @param {string} name - The cryptocurrency symbol (e.g., "BTC", "ETH", "SOL").
  * @return {string} - The price of the cryptocurrency as a string, or "N/A" if never resolved.
  * @customfunction
  */
@@ -232,45 +239,72 @@ function quoteCoinmarketcap(name) {
   const props = PropertiesService.getScriptProperties();
   const name1 = String(name).trim().split(' ')[0];
 
-  const geckoMap = {
-    "TON": "the-open-network", "toncoin": "the-open-network",
-    "ASTER": "astar", "aster": "astar",
-    "ETH": "ethereum", "ethereum": "ethereum",
-    "PUMP": "pump-fun", "pump-fun": "pump-fun",
-    "HYPE": "hyperliquid", "hyperliquid": "hyperliquid",
-    "JUP": "jup", "jupiter-ag": "jup",
-    "BTC": "bitcoin", "bitcoin": "bitcoin",
-    "SOL": "solana", "solana": "solana",
-    "STRK": "starknet", "starknet-token": "starknet",
-    "TRUMP": "official-trump", "official-trump": "official-trump",
-    "MATIC": "matic-network", "POL": "matic-network", "polygon-ecosystem-token": "matic-network",
-    "LINEA": "linea", "linea": "linea",
-    "PAXG": "pax-gold", "pax-gold": "pax-gold",
-    "OP": "optimism", "optimism-ethereum": "optimism",
-    "USDC": "usd-coin", "USDT": "tether",
+  // symbol/alias -> CMC numeric id. Verified live 2026-07-09 (each id's
+  // returned `symbol`/`name` checked against the intended token).
+  const CMC_ID_MAP = {
+    "ASTER": 36341, "aster": 36341,
+    "ETH": 1027, "ethereum": 1027,
+    "PUMP": 36507, "pump-fun": 36507,
+    "HYPE": 32196, "hyperliquid": 32196,
+    "JUP": 29210, "jupiter-ag": 29210,
+    "BTC": 1, "bitcoin": 1,
+    "SOL": 5426, "solana": 5426,
+    "STRK": 22691, "starknet-token": 22691,
+    "TRUMP": 35336, "official-trump": 35336,
+    "MATIC": 28321, "POL": 28321, "polygon-ecosystem-token": 28321,
+    "LINEA": 27657, "linea": 27657,
+    "PAXG": 4705, "pax-gold": 4705,
+    "OP": 11840, "optimism-ethereum": 11840,
+    "USDC": 3408, "USDT": 825,
+    // TON intentionally omitted -- see docstring above.
   };
 
-  const geckoId = geckoMap[name1] || name1.toLowerCase();
-  const cacheKey = "coingecko_" + geckoId;
-  const lastGoodKey = "coingecko_lastgood_" + geckoId;
+  function lastGoodOrNA_(lastGoodKey) {
+    const lastGoodRaw = props.getProperty(lastGoodKey);
+    if (lastGoodRaw) {
+      try {
+        return JSON.parse(lastGoodRaw).price;
+      } catch (e) {
+        // corrupt stored value -- fall through to N/A
+      }
+    }
+    return "N/A";
+  }
+
+  const id = CMC_ID_MAP[name1];
+  if (id === undefined) {
+    // Unresolvable/unmapped symbol (e.g. "TON" today) -- degrade straight
+    // to last-known-good, same treatment as an unresolvable symbol always
+    // got.
+    return lastGoodOrNA_("cmc_lastgood_" + name1.toLowerCase());
+  }
+
+  const cacheKey = "cmc_" + id;
+  const lastGoodKey = "cmc_lastgood_" + id;
 
   const cachedPrice = cache.get(cacheKey);
   if (cachedPrice !== null) return parseFloat(cachedPrice);
 
-  // Optional: set a free CoinGecko Demo API key via Project Settings >
-  // Script properties as COINGECKO_API_KEY to move off the stricter
-  // anonymous tier. Safe to leave unset -- falls back to today's behavior.
-  const apiKey = props.getProperty("COINGECKO_API_KEY");
-  const fetchOptions = { muteHttpExceptions: true };
-  if (apiKey) fetchOptions.headers = { "x-cg-demo-api-key": apiKey };
+  const fetchOptions = {
+    muteHttpExceptions: true,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    }
+  };
 
   const maxAttempts = 3; // 1 initial try + 2 retries
   const backoffMs = [500, 1500];
 
-  function fetchJson_(url) {
+  // Dedupe to the unique set of ids across all aliases so the batch request
+  // fetches each token exactly once.
+  const allIds = Array.from(new Set(Object.keys(CMC_ID_MAP).map(function (k) { return CMC_ID_MAP[k]; })));
+  const idsParam = allIds.join(",");
+
+  function fetchBatch_() {
+    const url = "https://api.coinmarketcap.com/data-api/v3/cryptocurrency/quote/latest?id=" + idsParam + "&convertId=2781";
     const resp = UrlFetchApp.fetch(url, fetchOptions);
     const code = resp.getResponseCode();
-    if (code !== 200) return null; // e.g. 429 "Throttled" plaintext body
+    if (code !== 200) return null; // e.g. throttled/WAF response
     try {
       return JSON.parse(resp.getContentText());
     } catch (e) {
@@ -280,35 +314,22 @@ function quoteCoinmarketcap(name) {
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const url = "https://api.coingecko.com/api/v3/simple/price?ids=" + encodeURIComponent(geckoId) + "&vs_currencies=usd";
-      const data = fetchJson_(url);
+      const data = fetchBatch_();
 
-      if (data && data[geckoId] && data[geckoId].usd !== undefined) {
-        const price = data[geckoId].usd;
-        cache.put(cacheKey, price.toString(), 21600); // 6h fast-path cache
-        props.setProperty(lastGoodKey, JSON.stringify({ price: price, ts: Date.now() }));
-        return price;
-      }
-
-      if (data) {
-        // 200 OK but this id wasn't found -- try CoinGecko's search as a
-        // one-time fallback (not worth retrying/backoff on its own).
-        const searchUrl = "https://api.coingecko.com/api/v3/search?query=" + encodeURIComponent(name1);
-        const searchData = fetchJson_(searchUrl);
-
-        if (searchData && searchData.coins && searchData.coins.length > 0) {
-          const foundId = searchData.coins[0].id;
-          const priceUrl = "https://api.coingecko.com/api/v3/simple/price?ids=" + foundId + "&vs_currencies=usd";
-          const priceData = fetchJson_(priceUrl);
-          if (priceData && priceData[foundId] && priceData[foundId].usd !== undefined) {
-            const price = priceData[foundId].usd;
-            cache.put(cacheKey, price.toString(), 21600);
-            props.setProperty(lastGoodKey, JSON.stringify({ price: price, ts: Date.now() }));
-            return price;
-          }
+      if (data && data.data && data.data.length) {
+        let requestedPrice = null;
+        for (let i = 0; i < data.data.length; i++) {
+          const entry = data.data[i];
+          const quote = entry.quotes && entry.quotes[0];
+          if (!quote || quote.price === null || quote.price === undefined) continue;
+          const price = quote.price;
+          cache.put("cmc_" + entry.id, price.toString(), 21600); // 6h fast-path cache
+          props.setProperty("cmc_lastgood_" + entry.id, JSON.stringify({ price: price, ts: Date.now() }));
+          if (entry.id === id) requestedPrice = price;
         }
-        // Genuinely not found (a real 200 response, not a throttle) -- no
-        // point retrying.
+        if (requestedPrice !== null) return requestedPrice;
+        // Batch call succeeded but this id had no usable price (e.g.
+        // delisted, like legacy MATIC id 3890) -- no point retrying.
         break;
       }
       // data === null: non-200 or unparseable (throttle/timeout) -- retry.
@@ -321,18 +342,10 @@ function quoteCoinmarketcap(name) {
     }
   }
 
-  // All attempts exhausted (or symbol genuinely unresolvable) -- degrade to
-  // the last confirmed-good price rather than surfacing N/A/#VALUE!.
-  const lastGoodRaw = props.getProperty(lastGoodKey);
-  if (lastGoodRaw) {
-    try {
-      return JSON.parse(lastGoodRaw).price;
-    } catch (e) {
-      // corrupt stored value -- fall through to N/A
-    }
-  }
-
-  return "N/A";
+  // All attempts exhausted (or symbol genuinely has no live price) --
+  // degrade to the last confirmed-good price rather than surfacing
+  // N/A/#VALUE!.
+  return lastGoodOrNA_(lastGoodKey);
 }
 
 
